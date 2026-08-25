@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>DSIK – Mobilní terminál denní výkaz</title>
+<style>
+:root{
+  --bg:#f4f7fb;--panel:#fff;--line:#dfe3eb;--text:#202124;--muted:#69717a;
+  --accent:#0f6cbd;--accent2:#e7f1fb;--danger:#c42b1c;--ok:#107c10;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--text)}
+.app{max-width:620px;margin:auto;min-height:100vh;padding:16px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px;box-shadow:0 4px 18px rgba(0,0,0,.06);margin-bottom:14px}
+h1{font-size:24px;margin:0 0 4px}.sub{font-size:13px;color:var(--muted);margin-bottom:14px}
+label{display:block;font-size:12px;color:var(--muted);margin:10px 0 5px}
+input,textarea{width:100%;padding:12px;border:1px solid var(--line);border-radius:8px;font:inherit}\ntextarea{min-height:74px;resize:vertical}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.remember{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px}
+.remember input{width:auto}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+button{padding:15px 10px;border:0;border-radius:10px;background:var(--accent);color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button.alt{background:var(--accent2);color:#0f5b9a}
+button.danger{background:#fde7e5;color:#9f1d14}
+.status{margin-top:12px;padding:10px;border-radius:8px;background:#f7f9fc;font-size:13px}
+.event{display:grid;grid-template-columns:90px 1fr auto;gap:8px;padding:10px 0;border-bottom:1px solid #edf0f5;align-items:center}
+.event:last-child{border-bottom:0}
+.event .time{font-weight:700}
+.event .meta{font-size:12px;color:var(--muted)}
+.badge{display:inline-block;padding:3px 7px;border-radius:999px;background:#eef2f7;font-size:11px}
+.code{word-break:break-all;font-family:Consolas,monospace;font-size:11px;background:#f7f7f7;padding:10px;border-radius:8px;border:1px solid var(--line);min-height:88px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap}
+.toolbar button{padding:10px 12px}
+.small{font-size:12px;color:var(--muted);line-height:1.45}
+@media(max-width:480px){.row,.actions{grid-template-columns:1fr}.event{grid-template-columns:74px 1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="card">
+    <h1>DSIK mobilní terminál</h1>
+    <div class="sub">Celý pracovní den na jednom místě</div>
+
+    <label>ID zaměstnance</label>
+    <input id="employeeId" placeholder="např. IC-00001" autocomplete="off">
+
+    <label>PIN</label>
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off">
+
+    <label class="remember">
+      <input id="rememberId" type="checkbox">
+      Pamatovat ID na tomto zařízení
+    </label>
+
+    <label>Poznámka k akci</label>
+    <textarea id="note" placeholder="např. návštěva bytovka 1212"></textarea>
+
+    <div class="actions">
+      <button onclick="stamp('PRICHOD')">Příchod</button>
+      <button class="alt" onclick="stamp('PRERUSENI')">Přerušení</button>
+      <button class="alt" onclick="stamp('NAVRAT')">Návrat</button>
+      <button onclick="stamp('ODCHOD')">Odchod</button>
+    </div>
+
+    <div class="status" id="status">Připraveno.</div>
+  </div>
+
+  <div class="card">
+    <strong>Dnešní záznamy</strong>
+    <div id="events" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <strong>Denní přenosový kód</strong>
+    <div class="small" style="margin:6px 0 10px">
+      Kód obsahuje všechny dnešní akce pro zadané ID. Datum, čas a akci vytváří aplikace.
+    </div>
+    <div class="code" id="codeBox">Zatím není co odeslat.</div>
+    <div class="toolbar" style="margin-top:10px">
+      <button onclick="makeDailyCode()">Obnovit kód</button>
+      <button class="alt" onclick="shareCode()">Odeslat / sdílet</button>
+      <button class="alt" onclick="copyCode()">Kopírovat</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>Záloha dat</strong>
+    <div class="toolbar" style="margin-top:10px">
+      <button class="alt" onclick="exportJson()">Export JSON</button>
+      <button class="alt" onclick="document.getElementById('importFile').click()">Import JSON</button>
+      <input id="importFile" type="file" accept="application/json" hidden>
+    </div>
+    <div class="small" style="margin-top:8px">Data jsou ukládána lokálně v IndexedDB a po zavření stránky zůstávají zachována.</div>
+  </div>
+</div>
+
+<script>
+const DB_NAME="DSIK_MOBILE_DAY_V1";
+const DB_VERSION=1;
+const STORE_EVENTS="events";
+const STORE_SETTINGS="settings";
+let db;
+
+function openDB(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open(DB_NAME,DB_VERSION);
+    req.onupgradeneeded=e=>{
+      const d=e.target.result;
+      if(!d.objectStoreNames.contains(STORE_EVENTS)){
+        const s=d.createObjectStore(STORE_EVENTS,{keyPath:"id",autoIncrement:true});
+        s.createIndex("employeeDate",["employeeId","date"]);
+      }
+      if(!d.objectStoreNames.contains(STORE_SETTINGS)){
+        d.createObjectStore(STORE_SETTINGS,{keyPath:"key"});
+      }
+    };
+    req.onsuccess=e=>resolve(e.target.result);
+    req.onerror=e=>reject(e.target.error);
+  });
+}
+function store(name,mode="readonly"){return db.transaction(name,mode).objectStore(name)}
+function add(name,val){return new Promise((res,rej)=>{const r=store(name,"readwrite").add(val);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+function put(name,val){return new Promise((res,rej)=>{const r=store(name,"readwrite").put(val);r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+function getAll(name){return new Promise((res,rej)=>{const r=store(name).getAll();r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+function clear(name){return new Promise((res,rej)=>{const r=store(name,"readwrite").clear();r.onsuccess=()=>res();r.onerror=()=>rej(r.error)})}
+function del(name,id){return new Promise((res,rej)=>{const r=store(name,"readwrite").delete(id);r.onsuccess=()=>res();r.onerror=()=>rej(r.error)})}
+
+function todayKey(){
+  const d=new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function token(){
+  const a=new Uint32Array(3);
+  crypto.getRandomValues(a);
+  return [...a].map(x=>x.toString(16)).join("");
+}
+function getGPS(){
+  return new Promise(resolve=>{
+    if(!navigator.geolocation)return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      p=>resolve({lat:p.coords.latitude,lon:p.coords.longitude,acc:p.coords.accuracy}),
+      ()=>resolve(null),
+      {enableHighAccuracy:true,timeout:5000,maximumAge:15000}
+    );
+  });
+}
+function encodePayload(obj){
+  const bytes=new TextEncoder().encode(JSON.stringify(obj));
+  let bin="";
+  bytes.forEach(b=>bin+=String.fromCharCode(b));
+  return "DSIKD1-"+btoa(bin).replaceAll("+","-").replaceAll("/","_").replaceAll("=","");
+}
+async function saveRememberedId(){
+  if(rememberId.checked){
+    await put(STORE_SETTINGS,{key:"rememberedId",value:employeeId.value.trim().toUpperCase()});
+  }else{
+    await put(STORE_SETTINGS,{key:"rememberedId",value:""});
+  }
+}
+async function loadRememberedId(){
+  const all=await getAll(STORE_SETTINGS);
+  const item=all.find(x=>x.key==="rememberedId");
+  if(item?.value){
+    employeeId.value=item.value;
+    rememberId.checked=true;
+  }
+}
+async function currentEvents(){
+  const id=employeeId.value.trim().toUpperCase();
+  const all=await getAll(STORE_EVENTS);
+  return all.filter(x=>x.employeeId===id && x.date===todayKey()).sort((a,b)=>a.ts.localeCompare(b.ts));
+}
+function actionLabel(a){
+  return ({PRICHOD:"Příchod",PRERUSENI:"Přerušení",NAVRAT:"Návrat",ODCHOD:"Odchod"})[a]||a;
+}
+async function stamp(action){
+  const id=employeeId.value.trim().toUpperCase();
+  const p=pin.value.trim();
+  if(!/^[A-Z0-9]{2,4}-\d{5}$/.test(id))return alert("Zadejte ID například IC-00001.");
+  if(!p)return alert("Zadejte PIN.");
+  await saveRememberedId();
+  status.textContent="Zaznamenávám čas a zjišťuji GPS…";
+  const gps=await getGPS();
+  const ts=new Date().toISOString();
+  await add(STORE_EVENTS,{
+    employeeId:id,
+    date:todayKey(),
+    action,
+    ts,
+    note:note.value.trim(),
+    gps,
+    eventToken:token()
+  });
+  status.textContent=`${actionLabel(action)} zaznamenán ${new Date(ts).toLocaleTimeString("cs-CZ")}. ${gps?`GPS ±${Math.round(gps.acc)} m.`:"GPS nedostupná."}`;
+  note.value="";
+  await renderEvents();
+  await makeDailyCode();
+}
+async function renderEvents(){
+  const list=await currentEvents();
+  events.innerHTML=list.length?list.map(x=>`
+    <div class="event">
+      <div class="time">${new Date(x.ts).toLocaleTimeString("cs-CZ",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}</div>
+      <div>
+        <b>${actionLabel(x.action)}</b>
+        <div class="meta">${x.note?`Poznámka: ${escapeHtml(x.note)}<br>`:""}${x.gps?`GPS ${x.gps.lat.toFixed(5)}, ${x.gps.lon.toFixed(5)} · ±${Math.round(x.gps.acc)} m`:"GPS nedostupná"}</div>
+      </div>
+      <button class="danger" style="padding:7px 9px;font-size:12px" onclick="removeEvent(${x.id})">Smazat</button>
+    </div>
+  `).join(""):`<div class="small">Zatím žádné dnešní záznamy.</div>`;
+}
+function escapeHtml(v=""){return String(v).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
+async function removeEvent(id){
+  if(!confirm("Smazat tento lokální záznam?"))return;
+  await del(STORE_EVENTS,id);
+  await renderEvents();
+  await makeDailyCode();
+}
+async function makeDailyCode(){
+  const id=employeeId.value.trim().toUpperCase();
+  const p=pin.value.trim();
+  if(!id||!p){codeBox.textContent="Zadejte ID a PIN.";return}
+  const list=await currentEvents();
+  if(!list.length){codeBox.textContent="Zatím není co odeslat.";return}
+  const payload={
+    format:"DSIK-DAY-1",
+    employeeId:id,
+    pin:p,
+    date:todayKey(),
+    events:list.map(x=>({action:x.action,ts:x.ts,note:x.note||"",gps:x.gps,eventToken:x.eventToken})),
+    createdAt:new Date().toISOString(),
+    batchToken:token()
+  };
+  codeBox.textContent=encodePayload(payload);
+}
+async function copyCode(){
+  await makeDailyCode();
+  const t=codeBox.textContent;
+  if(!t.startsWith("DSIKD1-"))return alert("Nejdřív vytvořte denní kód.");
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(t);
+      status.textContent="Kód zkopírován.";
+      return;
+    }
+  }catch(e){}
+  const ta=document.createElement("textarea");
+  ta.value=t; ta.setAttribute("readonly","");
+  ta.style.position="fixed"; ta.style.opacity="0";
+  document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0,ta.value.length);
+  try{
+    if(document.execCommand("copy")){status.textContent="Kód zkopírován.";document.body.removeChild(ta);return;}
+  }catch(e){}
+  document.body.removeChild(ta);
+  prompt("Zkopírujte kód ručně:",t);
+}
+async function shareCode(){
+  await makeDailyCode();
+  const t=codeBox.textContent;
+  if(!t.startsWith("DSIKD1-"))return alert("Není co odeslat.");
+  const title=`DSIK ${employeeId.value.trim().toUpperCase()} ${todayKey()}`;
+  if(navigator.share){
+    try{
+      await navigator.share({title,text:t});
+      status.textContent="Nabídka sdílení otevřena.";
+    }catch(e){
+      if(e.name!=="AbortError")await copyCode();
+    }
+  }else{
+    await copyCode();
+    alert("Tento prohlížeč nepodporuje systémovou nabídku sdílení. Kód byl zkopírován.");
+  }
+}
+async function exportJson(){
+  const data={
+    format:"DSIK-MOBILE-DAY-EXPORT",
+    version:1,
+    exportedAt:new Date().toISOString(),
+    events:await getAll(STORE_EVENTS),
+    settings:await getAll(STORE_SETTINGS)
+  };
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;
+  a.download=`DSIK-mobile-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+importFile.addEventListener("change",async e=>{
+  const f=e.target.files[0];
+  if(!f)return;
+  try{
+    const d=JSON.parse(await f.text());
+    if(d.format!=="DSIK-MOBILE-DAY-EXPORT")throw new Error("Neplatný soubor.");
+    if(!confirm("Import nahradí lokální data v této mobilní stránce. Pokračovat?"))return;
+    await clear(STORE_EVENTS);await clear(STORE_SETTINGS);
+    for(const x of d.events||[])await put(STORE_EVENTS,x);
+    for(const x of d.settings||[])await put(STORE_SETTINGS,x);
+    await loadRememberedId();await renderEvents();await makeDailyCode();
+    alert("Import dokončen.");
+  }catch(err){alert("Import selhal: "+err.message)}
+  finally{e.target.value=""}
+});
+employeeId.addEventListener("input",async()=>{await renderEvents();await makeDailyCode()});
+rememberId.addEventListener("change",saveRememberedId);
+
+(async()=>{
+  db=await openDB();
+  await loadRememberedId();
+  await renderEvents();
+  await makeDailyCode();
+})();
+</script>
+</body>
+</html>
